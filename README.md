@@ -45,15 +45,27 @@ pip install -r requirements.txt
 6. Run the script:
 
 ```bash
+cd $HOME/ics-gcal-sync
+source .venv/bin/activate
 python sync_calendar.py
 ```
 
 On first run, you'll be prompted for:
 - The ICS calendar URL
-- Your Google Calendar ID
+- Your Google Calendar ID (found in calendar settings under 'Integrate calendar')
 - Path to your Google client secret JSON file
+- Number of months of past events to sync (e.g., 3 for three months)
 
 The script will save these settings for future use.
+
+## Features
+
+- Syncs events from ICS feed to Google Calendar
+- Automatically parses event times from description if not provided in ICS
+- Maintains timezone information (Eastern Time)
+- Filters out old events based on configured months to sync
+- Handles rate limiting with automatic retries
+- Caches OAuth credentials for future runs
 
 ## Running as a Service with PM2
 
