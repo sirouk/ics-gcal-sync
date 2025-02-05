@@ -148,7 +148,8 @@ def parse_ics(file_path, months_to_sync, timezone):
     # Use configured timezone
     tz = ZoneInfo(timezone)
 
-    for component in calendar.walk():
+    # Use subcomponents instead of walk() to avoid recursion
+    for component in calendar.subcomponents:
         if component.name == "VEVENT":
             start = component.get('dtstart').dt
             summary = str(component.get('summary'))
@@ -175,7 +176,6 @@ def parse_ics(file_path, months_to_sync, timezone):
             )
             
             if needs_time_parsing:
-                # Try to parse time from description
                 try:
                     if "Starts:" in description and "Ends:" in description:
                         desc_lines = description.split('\n')
@@ -185,7 +185,6 @@ def parse_ics(file_path, months_to_sync, timezone):
                                     _, times_part = line.split("Starts:")
                                     start_part, end_part = times_part.split("Ends:")
                                     
-                                    # Parse times using the year from the original date
                                     start_str = start_part.strip()
                                     if '@' not in start_str:
                                         print(f"Warning: Invalid time format in description for {summary}")
@@ -202,7 +201,6 @@ def parse_ics(file_path, months_to_sync, timezone):
                                     end_date, end_time = end_str.split('@')
                                     end_time = parse_time_str(end_date.strip(), end_time.strip(), end.year)
                                     
-                                    # Update timezone assignment to use configured timezone
                                     start = start_time.replace(tzinfo=tz)
                                     end = end_time.replace(tzinfo=tz)
                                     break
@@ -211,7 +209,6 @@ def parse_ics(file_path, months_to_sync, timezone):
                                     raise
                 except Exception as e:
                     print(f"Error parsing times from description for {summary}: {str(e)}")
-                    # If parsing fails, use default time (beginning of day)
                     if isinstance(start, datetime.date):
                         start = datetime.datetime.combine(start, datetime.datetime.min.time())
                     if isinstance(end, datetime.date):
@@ -321,6 +318,57 @@ def sync_events(events, timezone):
                 print(f"Error with event {event['summary']}: {str(e)}")
                 break  # Exit on non-rate-limit errors
 
+def remove_duplicates_from_ics(file_path):
+    """Remove duplicate events from ICS file based on summary and start time"""
+    try:
+        with open(file_path, 'rb') as f:
+            calendar = icalendar.Calendar.from_ical(f.read())
+        
+        # Track unique events using summary + start time as key
+        unique_events = {}
+        components = []
+        event_count = 0
+        
+        # First, collect all direct components
+        for component in calendar.subcomponents:
+            if component.name == "VEVENT":
+                event_count += 1
+                start = component.get('dtstart').dt
+                summary = str(component.get('summary'))
+                
+                # Create unique key from summary and start time
+                event_key = f"{summary}_{start}"
+                
+                if event_key not in unique_events:
+                    unique_events[event_key] = True
+                    components.append(component)
+                else:
+                    print(f"Removing duplicate event: {summary} at {start}")
+            else:
+                components.append(component)
+        
+        # Create new calendar with unique events
+        new_calendar = icalendar.Calendar()
+        
+        # Copy over any calendar properties
+        for attr in calendar.property_items():
+            new_calendar.add(attr[0], attr[1])
+        
+        # Add all unique components
+        for component in components:
+            new_calendar.add_component(component)
+        
+        # Write back to file
+        with open(file_path, 'wb') as f:
+            f.write(new_calendar.to_ical())
+        
+        return event_count - len(unique_events)
+        
+    except Exception as e:
+        print(f"Error in remove_duplicates_from_ics: {str(e)}")
+        # If there's an error, return 0 to indicate no duplicates were removed
+        return 0
+
 if __name__ == '__main__':
     config = load_or_create_config()
     
@@ -339,6 +387,12 @@ if __name__ == '__main__':
             
             ics_path = 'stored_cal.ics'
             download_ics(ICS_URL, ics_path)
+            
+            # Remove duplicates before processing
+            duplicates_removed = remove_duplicates_from_ics(ics_path)
+            if duplicates_removed > 0:
+                print(f"Removed {duplicates_removed} duplicate events from ICS file")
+            
             events = parse_ics(ics_path, config['sync_months'], config['timezone'])
             sync_events(events, config['timezone'])
             print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Sync complete.")
