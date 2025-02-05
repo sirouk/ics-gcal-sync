@@ -262,9 +262,94 @@ def parse_time_str(date_str, time_str, year):
 
 def sync_events(events, timezone):
     service = get_calendar_service()
-    existing_events = service.events().list(calendarId=CALENDAR_ID).execute().get('items', [])
-    existing_summaries = {event['summary']: event['id'] for event in existing_events}
+    
+    # Get all existing events and check for duplicates
+    print("Checking for duplicates in Google Calendar...")
+    
+    # Calculate time bounds
+    now = datetime.datetime.now(ZoneInfo(timezone))
+    time_min = (now - datetime.timedelta(days=30.44 * config['sync_months'])).isoformat()
+    time_max = (now + datetime.timedelta(days=365)).isoformat()
+    
+    # Get all events within our time window
+    existing_events = []
+    page_token = None
+    while True:
+        events_result = service.events().list(
+            calendarId=CALENDAR_ID,
+            timeMin=time_min,
+            timeMax=time_max,
+            pageToken=page_token,
+            singleEvents=True  # Expand recurring events
+        ).execute()
+        existing_events.extend(events_result.get('items', []))
+        page_token = events_result.get('nextPageToken')
+        if not page_token:
+            break
+    
+    # Track events by summary and start time
+    event_map = {}
+    duplicates_to_remove = []
+    
+    for event in existing_events:
+        if 'summary' not in event or 'start' not in event:
+            continue
+            
+        summary = event['summary']
+        start_time = event['start'].get('dateTime', event['start'].get('date', ''))
+        
+        # Create a more specific key including the event name and start time
+        key = f"{summary}_{start_time}"
+        
+        if key in event_map:
+            # We found a duplicate
+            print(f"Found duplicate in calendar: {summary} at {start_time}")
+            # Keep the event with the earlier creation time
+            existing_time = event.get('created', '')
+            previous_time = event_map[key][1]
+            
+            if existing_time > previous_time:
+                # Remove the newer duplicate
+                duplicates_to_remove.append(event['id'])
+            else:
+                # Remove the older one and update the map with this one
+                duplicates_to_remove.append(event_map[key][0])
+                event_map[key] = (event['id'], existing_time)
+        else:
+            event_map[key] = (event['id'], event.get('created', ''))
+    
+    # Remove duplicate events
+    for event_id in duplicates_to_remove:
+        try:
+            service.events().delete(calendarId=CALENDAR_ID, eventId=event_id).execute()
+            print(f"Removed duplicate event with ID: {event_id}")
+            # Add a small delay to avoid rate limits
+            time.sleep(0.1)
+        except Exception as e:
+            print(f"Error removing duplicate event: {str(e)}")
+    
+    if duplicates_to_remove:
+        print(f"Removed {len(duplicates_to_remove)} duplicate events from Google Calendar")
+        # Refresh our list of existing events
+        existing_events = []
+        page_token = None
+        while True:
+            events_result = service.events().list(
+                calendarId=CALENDAR_ID,
+                timeMin=time_min,
+                timeMax=time_max,
+                pageToken=page_token,
+                singleEvents=True
+            ).execute()
+            existing_events.extend(events_result.get('items', []))
+            page_token = events_result.get('nextPageToken')
+            if not page_token:
+                break
+    
+    # Create map of existing events by summary for updates
+    existing_summaries = {event['summary']: event['id'] for event in existing_events if 'summary' in event}
 
+    # Continue with normal sync process
     for event in events:
         start_time = event['start']
         end_time = event['end']
@@ -277,7 +362,6 @@ def sync_events(events, timezone):
 
         # Ensure timezone info exists
         if not start_time.tzinfo:
-            # Use configured timezone
             start_time = start_time.replace(tzinfo=ZoneInfo(timezone))
             end_time = end_time.replace(tzinfo=ZoneInfo(timezone))
 
