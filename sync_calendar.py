@@ -9,6 +9,7 @@ from google.auth.transport.requests import Request
 import pickle
 import time
 import json
+from zoneinfo import ZoneInfo
 
 # Google Calendar API setup
 SCOPES = ['https://www.googleapis.com/auth/calendar']
@@ -19,13 +20,32 @@ def load_or_create_config():
         with open(config_file, 'r') as f:
             config = json.load(f)
             
-        # Check if sync_months exists in config, if not, prompt for it
-        if 'sync_months' not in config:
-            print("\nHow many months of past events should be synced?")
-            print("(Enter a number, e.g. 3 for three months)")
-            config['sync_months'] = int(input().strip())
-            
-            # Save updated config
+        # Check if required fields exist in config, if not, prompt for them
+        required_fields = {
+            'sync_months': "\nHow many months of past events should be synced?\n(Enter a number, e.g. 3 for three months)",
+            'timezone': "\nWhat timezone are you in?\n(e.g., America/New_York, America/Los_Angeles, Europe/London)\nSee: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones"
+        }
+        
+        updated = False
+        for field, prompt in required_fields.items():
+            if field not in config:
+                print(prompt)
+                if field == 'sync_months':
+                    config[field] = int(input().strip())
+                else:
+                    while True:
+                        try:
+                            tz = input().strip()
+                            # Validate timezone
+                            ZoneInfo(tz)
+                            config[field] = tz
+                            break
+                        except Exception:
+                            print("Invalid timezone. Please enter a valid timezone name.")
+                updated = True
+        
+        # Save updated config if needed
+        if updated:
             with open(config_file, 'w') as f:
                 json.dump(config, f, indent=4)
                 
@@ -48,11 +68,24 @@ def load_or_create_config():
     print("(Enter a number, e.g. 3 for three months)")
     months = int(input().strip())
     
+    print("\nWhat timezone are you in?")
+    print("(e.g., America/New_York, America/Los_Angeles, Europe/London)")
+    print("See: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones")
+    while True:
+        try:
+            timezone = input().strip()
+            # Validate timezone
+            ZoneInfo(timezone)
+            break
+        except Exception:
+            print("Invalid timezone. Please enter a valid timezone name.")
+    
     config = {
         'ics_url': ics_url,
         'calendar_id': calendar_id,
         'client_secret_file': client_secret_file,
-        'sync_months': months
+        'sync_months': months,
+        'timezone': timezone
     }
     
     with open(config_file, 'w') as f:
@@ -105,13 +138,16 @@ def download_ics(url, file_path):
     else:
         print("Failed to download ICS file.")
 
-def parse_ics(file_path, months_to_sync):
+def parse_ics(file_path, months_to_sync, timezone):
     with open(file_path, 'rb') as f:
         calendar = icalendar.Calendar.from_ical(f.read())
 
     events = []
     cutoff_date = datetime.datetime.now() - datetime.timedelta(days=30.44 * months_to_sync)
     
+    # Use configured timezone
+    tz = ZoneInfo(timezone)
+
     for component in calendar.walk():
         if component.name == "VEVENT":
             start = component.get('dtstart').dt
@@ -166,10 +202,9 @@ def parse_ics(file_path, months_to_sync):
                                     end_date, end_time = end_str.split('@')
                                     end_time = parse_time_str(end_date.strip(), end_time.strip(), end.year)
                                     
-                                    # Add timezone info
-                                    eastern = datetime.timezone(datetime.timedelta(hours=-4))
-                                    start = start_time.replace(tzinfo=eastern)
-                                    end = end_time.replace(tzinfo=eastern)
+                                    # Update timezone assignment to use configured timezone
+                                    start = start_time.replace(tzinfo=tz)
+                                    end = end_time.replace(tzinfo=tz)
                                     break
                                 except ValueError as e:
                                     print(f"Error parsing time format for {summary}: {str(e)}")
@@ -228,7 +263,7 @@ def parse_time_str(date_str, time_str, year):
     
     return dt
 
-def sync_events(events):
+def sync_events(events, timezone):
     service = get_calendar_service()
     existing_events = service.events().list(calendarId=CALENDAR_ID).execute().get('items', [])
     existing_summaries = {event['summary']: event['id'] for event in existing_events}
@@ -245,20 +280,20 @@ def sync_events(events):
 
         # Ensure timezone info exists
         if not start_time.tzinfo:
-            eastern = datetime.timezone(datetime.timedelta(hours=-4))
-            start_time = start_time.replace(tzinfo=eastern)
-            end_time = end_time.replace(tzinfo=eastern)
+            # Use configured timezone
+            start_time = start_time.replace(tzinfo=ZoneInfo(timezone))
+            end_time = end_time.replace(tzinfo=ZoneInfo(timezone))
 
         event_data = {
             'summary': event['summary'],
             'description': event['description'],
             'start': {
                 'dateTime': start_time.isoformat(),
-                'timeZone': 'America/New_York'
+                'timeZone': timezone
             },
             'end': {
                 'dateTime': end_time.isoformat(),
-                'timeZone': 'America/New_York'
+                'timeZone': timezone
             }
         }
         
@@ -295,8 +330,25 @@ if __name__ == '__main__':
     CALENDAR_ID = config['calendar_id']
     CLIENT_SECRET_FILE = config['client_secret_file']
     
-    ics_path = 'stored_cal.ics'
-    download_ics(ICS_URL, ics_path)
-    events = parse_ics(ics_path, config['sync_months'])
-    sync_events(events)
-    print("Sync complete.")
+    print("\nCalendar sync script started. Press Ctrl+C to stop.")
+    
+    while True:
+        try:
+            current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"\n[{current_time}] Starting sync...")
+            
+            ics_path = 'stored_cal.ics'
+            download_ics(ICS_URL, ics_path)
+            events = parse_ics(ics_path, config['sync_months'], config['timezone'])
+            sync_events(events, config['timezone'])
+            print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Sync complete.")
+            print("Waiting 15 minutes until next sync...")
+            time.sleep(900)  # 900 seconds = 15 minutes
+            
+        except KeyboardInterrupt:
+            print("\nSync script stopped by user.")
+            break
+        except Exception as e:
+            print(f"Error occurred: {str(e)}")
+            print("Will retry in 15 minutes...")
+            time.sleep(900)
